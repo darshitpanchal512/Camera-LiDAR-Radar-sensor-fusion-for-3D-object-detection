@@ -1,21 +1,16 @@
 import os
 import rclpy
 from rclpy.node import Node
-
 import numpy as np
-np.float = float          # old-numpy shim, same as your other nodes
+np.float = float       
 import cv2
-
 from sensor_msgs.msg import Image, PointCloud2
 from std_msgs.msg import Header
 from cv_bridge import CvBridge
 import sensor_msgs_py.point_cloud2 as pc2
-
 import tf2_ros
 from tf2_ros import TransformException
 import tf_transformations
-
-# --- free any leftover GPU memory before we load YOLO (helps the 2GB GPU) ---
 import torch
 torch.cuda.empty_cache()
 from ultralytics import YOLO
@@ -23,10 +18,10 @@ from ultralytics import YOLO
 # =========================================================
 # Settings
 # =========================================================
-YOLO_MODEL     = os.environ.get("YOLO_ENGINE_PATH", "./yolo26n.engine")   # override with YOLO_ENGINE_PATH env var
+YOLO_MODEL     = os.environ.get("YOLO_ENGINE_PATH", "./yolo26n.engine")  
 CONF_THRESH    = 0.4
 WANTED_CLASSES = [0, 2]    # COCO ids -> 0 = person, 2 = car
-MARGIN_PX      = 5         # slightly enlarge each box to catch edge points
+MARGIN_PX      = 5 
 
 
 class FrustumExtractor(Node):
