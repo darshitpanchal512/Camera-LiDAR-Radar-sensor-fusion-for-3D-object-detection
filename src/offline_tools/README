@@ -1,1 +1,42 @@
+# Offline Analysis Tools
 
+Four small scripts that let me study one saved frame of the pipeline at a time — GPU-only, ROS-free — using the same model and the same decode maths as the live inference node.
+
+
+
+## The scripts
+
+| Script | Purpose | When to reach for it |
+|---|---|---|
+| `test_load.py` | Power-on self-test — dummy tensor through the model, verify output shapes | First run after model/weights change; confirms the model side is sound |
+| `decode_frustum.py` | Base offline replay of one real saved frustum | Confirm a single frame decodes to a believable box |
+| `decode_frustum_v2.py` | Intensity ablation — same 1024 points, model run 4 different ways on the intensity channel | Foreground is 0% and you suspect the intensity channel |
+| `decode_frustum_v3.py` | Depth sweep — depth histogram + 4 depth-cutoff strategies | The frustum is too deep (car + background) and you need to find the right depth filter |
+
+## Prerequisites
+
+All four scripts need the following in `/root/` (or wherever the script's paths point):
+
+- `frustum_pointnet.py` — model definition (from fregu856/3DOD_thesis)
+- `model_37_2_epoch_400.pth` — trained weights (from fregu856/3DOD_thesis)
+- `kitti_centered_frustum_mean_xyz.pkl` — frustum centering offset
+- `kitti_train_mean_car_size.pkl` — average car dimensions
+
+The three decode scripts additionally need one saved frustum file:
+
+- `sample_frustum.npz` (from `frustum_saver_node.py`) or `live_frustum_dump.npz` (auto-saved by the live inference node's first-frustum dump)
+
+## How to run
+
+Stop the bag, ROS, and YOLO first (they hold the 2 GB GPU). Then:
+
+```bash
+python3 test_load.py                # smoke test — should print "SUCCESS" and output shapes
+python3 decode_frustum.py           # base decode + sanity check
+python3 decode_frustum_v2.py        # intensity ablation
+python3 decode_frustum_v3.py        # depth sweep + histogram (this is the one that produced 49.9%)
+```
+
+## What each script writes
+
+- Everything is stdout-only — no files created, no data touched. These are read-only diagnostic tools.
