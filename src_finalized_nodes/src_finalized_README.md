@@ -36,13 +36,13 @@ The succession is the point: the initial version made these limitations *visible
 
 ## Running this code
 
-I have **not** made the finalized scripts portable in the way I did for the initial version — the environment variables, standalone launch configuration, and dependency documentation in [`CONFIG.md`](../CONFIG) apply only to `src/`. The finalized scripts in this folder retain their original in-container paths and were designed to run inside the team's specific development environment.
+I have **not** made the finalized scripts portable in the way I did for the initial version — the environment variables, standalone launch configuration, and dependency documentation in [`CONFIG`](../CONFIG) apply only to `src/`. The finalized scripts in this folder retain their original in-container paths and were designed to run inside the team's specific development environment.
 
 If you want to actually execute the finalized pipeline, expect meaningful integration work: the finalized model weights are not distributed, the ANTON bag data is not distributable, and the calibration files and TensorRT engines are specific to that hardware. Treat this folder as **reference code**, not a runnable release.
 
 ## Third-party dependencies
 
-The finalized pipeline builds on the same open-source foundations as the initial version — see [`acknowledgements.md`](../acknowledgements) for full credit — plus:
+The finalized pipeline builds on the same open-source foundations as the initial version — see [`acknowledgements`](../acknowledgements) for full credit — plus:
 
 - **nuScenes dataset** — for training the finalized 7D model.
 - **YOLO26 / Ultralytics** — for the 2D instance-segmentation frontend.
