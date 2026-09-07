@@ -11,7 +11,7 @@ The full pipeline was a four-person team effort. My contribution and the team's 
 
 ---
 
-## What the full pipeline does (team scope)
+## What the full pipeline does
 
 The final architecture is a **sequential middle-level fusion pipeline**. YOLO26-seg produces instance masks on the camera stream. Those masks carve pixel-accurate frustums from the LiDAR and radar data, which are unified into a single **seven-channel representation** carrying position, reflectivity, Doppler velocity, and a modality flag. A custom **Frustum-PointNet with a T-Net spatial-alignment stage** then regresses full 3D bounding boxes — centre, dimensions, and yaw. Everything runs live off recorded drives, published as ROS 2 markers, visualised in RViz.
 
