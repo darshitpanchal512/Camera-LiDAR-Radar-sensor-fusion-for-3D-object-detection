@@ -1,1 +1,19 @@
+# LiDAR Preprocessing
 
+Turns the raw 360° Ouster OS2 scan into a clean, evenly-spaced, ground-free point cloud ready for fusion.
+
+## What goes here
+
+- The ROS 2 node source (Python) that subscribes to `/velodyne/points_raw` (or the equivalent Ouster topic), applies ROI crop → voxel downsample → ground removal, and publishes on `/filtered_points`.
+- Package files: `package.xml`, `setup.py`, `resource/`.
+
+## Inputs and outputs
+
+- **Subscribes:** raw LiDAR point cloud (`sensor_msgs/PointCloud2`)
+- **Publishes:** filtered point cloud on `/filtered_points` (`sensor_msgs/PointCloud2`, XYZI)
+
+## Key parameters
+
+- ROI: `x ∈ [0, 40]`, `y ∈ [−10, 10]`, `z ∈ [−1.5, 3.0]` metres
+- Voxel size: `0.1` m
+- Ground threshold: `z = −1.5` m
