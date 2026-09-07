@@ -43,13 +43,12 @@ For a full walk-through of what I built and what I learned, see [`docs/02_my_con
 ## What's in this repository
 
 ```
-docs/                 Written references — pipeline overview, my part, and technical deep-dives
-presentations/        Deep-dive slide deck
+src_finalized/        The finalized team pipeline — reference code, joint team authorship (see folder README)
 src/                  Only code  — LiDAR prep, extractor v1, car inference, fusion messages, offline tools
-results/              RViz screenshots
+
 ```
 
-The team's finalized presentation is **not** included here at the team's request. What's public here is the code and documentation I own.
+The team's finalized presentation is **not** included here at the team's request. What's public here is the code and documentation I own. The finalized **code** in `src_finalized/` is included for reference and completeness — it was built collaboratively by the team, and I am not the sole author. See [`src_finalized/README.md`](src_finalized/README.md) for the authorship details.
 
 ---
 
@@ -70,7 +69,7 @@ The team's finalized presentation is **not** included here at the team's request
 
 ## Model weights
 
-Pretrained weights are **not included** in this repository. The AI inference backbone in `src/car_inference/` builds on [fregu856/3DOD_thesis](https://github.com/fregu856/3DOD_thesis) — please download the KITTI Frustum-PointNet weights from that repository directly.
+**Pretrained weights are **not included** in this repository. The AI inference backbone in `src/car_inference/` builds on [fregu856/3DOD_thesis](https://github.com/fregu856/3DOD_thesis) — please download the KITTI Frustum-PointNet weights from that repository directly. The finalized team model in `src_finalized/` was trained on nuScenes and those weights are also not distributed here.**
 
 ## Data
 
@@ -89,4 +88,5 @@ See [`acknowledgements.md`](acknowledgements.md) for the full credit sheet.
 
 ## License
 
-[MIT](LICENSE) — for the code I authored. Third-party components retain their original licenses.
+[MIT](LICENSE) — for the code I authored. Third-party components retain their original licenses. Code in `src_finalized/` is jointly attributed to the Project 008 team.
+
