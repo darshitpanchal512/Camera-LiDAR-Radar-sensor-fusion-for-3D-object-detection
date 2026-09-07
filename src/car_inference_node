@@ -1,0 +1,364 @@
+import os
+import sys
+import pickle
+import numpy as np
+np.float = float
+
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+
+from sensor_msgs.msg import PointCloud2
+import sensor_msgs_py.point_cloud2 as pc2
+from visualization_msgs.msg import Marker, MarkerArray
+from geometry_msgs.msg import Point
+
+import torch
+
+from fusion_msgs.msg import FrustumDetectionArray
+
+
+# ============================ SETTINGS ============================
+ROOT          = '/root'
+WEIGHTS       = os.path.join(ROOT, 'model_37_2_epoch_400.pth')
+MEAN_XYZ_PKL  = os.path.join(ROOT, 'kitti_centered_frustum_mean_xyz.pkl')
+MEAN_SIZE_PKL = os.path.join(ROOT, 'kitti_train_mean_car_size.pkl')
+
+HANDLED_CLASS = 'car'
+
+INPUT_TOPIC   = '/frustum/detections'
+MARKER_TOPIC  = '/cars/boxes_3d'
+
+FX, CX = 880.5002, 926.3907
+
+NUM_POINTS    = 1024
+NH            = 4
+
+INTENSITY_SCALE = 324.0
+
+# DEBUG: relax the sanity gate while we're investigating.
+SANITY_GATE   = False
+MARKER_LIFETIME_SEC = 3.0
+# ==================================================================
+
+
+sys.path.insert(0, ROOT)
+from frustum_pointnet import FrustumPointNet
+
+
+def load_pickle(path):
+    with open(path, 'rb') as f:
+        try:
+            return pickle.load(f)
+        except UnicodeDecodeError:
+            f.seek(0)
+            return pickle.load(f, encoding='latin1')
+
+def wrap_to_pi(a):
+    return (a + np.pi) % (2 * np.pi) - np.pi
+
+def bin_center(b):
+    return wrap_to_pi(b * (2 * np.pi / NH))
+
+
+class CarInferenceNode(Node):
+    def __init__(self):
+        super().__init__('car_inference')
+
+        if not torch.cuda.is_available():
+            raise RuntimeError("No GPU available - this node needs CUDA.")
+
+        self.get_logger().info(f"Loading Frustum-PointNet weights: {WEIGHTS}")
+        self.model = FrustumPointNet('live_car_inference', ROOT)
+        try:
+            state = torch.load(WEIGHTS, map_location='cuda')
+        except Exception:
+            state = torch.load(WEIGHTS, map_location='cuda', weights_only=False)
+        self.model.load_state_dict(state)
+        self.model = self.model.cuda().eval()
+
+        self.mean_xyz  = np.array(load_pickle(MEAN_XYZ_PKL),
+                                  dtype=np.float64).reshape(3)
+        self.mean_size = np.array(load_pickle(MEAN_SIZE_PKL),
+                                  dtype=np.float64).reshape(3)
+
+        sub_qos = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
+                             history=HistoryPolicy.KEEP_LAST, depth=5)
+        self.create_subscription(FrustumDetectionArray, INPUT_TOPIC,
+                                 self.detections_cb, sub_qos)
+        self.markers_pub = self.create_publisher(MarkerArray, MARKER_TOPIC, 10)
+
+        np.random.seed(0)
+
+        self.frame_count = 0
+        self.boxes_published = 0
+
+        
+        self.dumped = False
+        self.dump_path = '/root/live_frustum_dump.npz'
+
+        self.get_logger().info("Car Inference Node online (DEBUG mode).")
+        self.get_logger().info(
+            f"  Listening: {INPUT_TOPIC}  for class='{HANDLED_CLASS}'")
+        self.get_logger().info(
+            f"  Publishing: {MARKER_TOPIC}  (lifetime {MARKER_LIFETIME_SEC}s)")
+        self.get_logger().info(f"  Sanity gate: {SANITY_GATE} (off for debug)")
+        self.get_logger().info(f"  Will dump first car frustum to {self.dump_path}")
+
+    def detections_cb(self, msg):
+        self.frame_count += 1
+
+        cars = [d for d in msg.detections if d.class_name == HANDLED_CLASS]
+        self.get_logger().info(
+            f"frame {self.frame_count}: array has {len(msg.detections)} det "
+            f"({len(cars)} car)")
+
+        if not cars:
+            return  # don't publish empty arrays - old boxes will linger via lifetime
+
+        marker_array = MarkerArray()
+        boxes_this_frame = 0
+
+        for i, det in enumerate(cars):
+            frustum_xyzi = self._read_xyzi(det.points)   # (M, 4)
+            frustum_pts = frustum_xyzi[:, :3]            # (M, 3) for geometry/logging
+            frustum_inten = frustum_xyzi[:, 3]           # (M,)   raw intensity
+            n_pts = frustum_pts.shape[0]
+            self.get_logger().info(
+                f"  car #{i+1}: {n_pts} pts, conf {det.confidence:.2f}, "
+                f"box {[int(b) for b in det.box_2d]}")
+
+            if n_pts < 20:
+                self.get_logger().warn(f"  car #{i+1}: too few points, skipping")
+                continue
+
+            z_min, z_max = float(frustum_pts[:, 2].min()), float(frustum_pts[:, 2].max())
+            self.get_logger().info(
+                f"  car #{i+1}: depth z=[{z_min:.1f}, {z_max:.1f}] m")
+
+            i_min = float(frustum_inten.min()) if frustum_inten.size else 0.0
+            i_max = float(frustum_inten.max()) if frustum_inten.size else 0.0
+            self.get_logger().info(
+                f"  car #{i+1}: intensity range = [{i_min:.2f}, {i_max:.2f}]")
+
+            # depth histogram in 5m bins, so we can see where points really sit
+            hist_str = self._depth_histogram_string(frustum_pts[:, 2])
+            self.get_logger().info(f"  car #{i+1}: depth hist: {hist_str}")
+
+            
+            if not self.dumped:
+                box_arr = np.array([det.box_2d[0], det.box_2d[2],
+                                    det.box_2d[1], det.box_2d[3]], dtype=np.float64)
+                # cam_points: stack xyz + zero intensity (matches the saver format)
+                cam_points = np.column_stack([frustum_pts,
+                                              np.zeros(frustum_pts.shape[0])])
+                K_arr = np.array([FX, 878.7256, CX, 578.7613], dtype=np.float64)
+                np.savez(self.dump_path,
+                         cam_points=cam_points,
+                         box=box_arr,
+                         K=K_arr)
+                self.dumped = True
+                self.get_logger().info(
+                    f"  >>> DUMPED first car frustum to {self.dump_path} "
+                    f"({frustum_pts.shape[0]} points)")
+                self.get_logger().info(
+                    "  >>> Stop everything and run:  python3 /root/decode_frustum_v3.py")
+
+            box3d, fg_pct = self._run_model_verbose(frustum_pts, frustum_inten, det.box_2d)
+            self.get_logger().info(f"  car #{i+1}: model foreground={fg_pct:.1f}%")
+
+            if box3d is None:
+                self.get_logger().warn(f"  car #{i+1}: REJECTED (model returned None)")
+                continue
+
+            self.get_logger().info(
+                f"  car #{i+1}: BOX center z={box3d['center'][2]:.1f}m "
+                f"h={box3d['h']:.2f} w={box3d['w']:.2f} l={box3d['l']:.2f}")
+
+            marker_array.markers.append(self._make_box_marker(
+                box3d, stamp=msg.header.stamp,
+                marker_id=2 * i + 1))
+            marker_array.markers.append(self._make_label_marker(
+                box3d, stamp=msg.header.stamp,
+                marker_id=2 * i + 2,
+                text=f"car {det.confidence:.2f}"))
+            boxes_this_frame += 1
+
+        if boxes_this_frame > 0:
+            self.markers_pub.publish(marker_array)
+            self.boxes_published += boxes_this_frame
+            self.get_logger().info(
+                f"  -> published {boxes_this_frame} box(es). "
+                f"Total ever: {self.boxes_published}")
+
+    def _run_model_verbose(self, frustum_cam_pts, frustum_intensity, box_2d):
+        x1, _, x2, _ = box_2d
+        u_center = 0.5 * (x1 + x2)
+        frustum_angle = np.arctan2(u_center - CX, FX)
+
+        c, s = np.cos(frustum_angle), np.sin(frustum_angle)
+        R_frustum = np.array([[ c, 0, -s],
+                              [ 0, 1,  0],
+                              [ s, 0,  c]], dtype=np.float64)
+
+        centered = (R_frustum @ frustum_cam_pts.T).T - self.mean_xyz
+
+        M = centered.shape[0]
+        if M >= NUM_POINTS:
+            idx = np.random.choice(M, NUM_POINTS, replace=False)
+        else:
+            idx = np.random.choice(M, NUM_POINTS, replace=True)
+
+        # rescales when the values look un-normalised. For this bag the max is
+    
+        intensity_sampled = frustum_intensity[idx]
+        if intensity_sampled.size and intensity_sampled.max() > 1.5:
+            intensity_sampled = np.clip(intensity_sampled / INTENSITY_SCALE, 0.0, 1.0)
+
+        feats = np.zeros((NUM_POINTS, 4), dtype=np.float32)
+        feats[:, :3] = centered[idx].astype(np.float32)
+        feats[:,  3] = intensity_sampled.astype(np.float32)   # <-- NOW USING INTENSITY
+        inp = torch.from_numpy(feats.T).unsqueeze(0).cuda()
+
+        with torch.no_grad():
+            seg, tnet, bbox, seg_mean, dontcare = self.model(inp)
+
+        seg_np = seg[0].cpu().numpy()
+        fg = int(np.sum(seg_np[:, 1] > seg_np[:, 0]))
+        fg_pct = 100.0 * fg / NUM_POINTS
+
+        if int(dontcare[0].cpu().numpy()) == 0:
+            return None, fg_pct
+
+        bbox     = bbox[0].cpu().numpy()
+        tnet     = tnet[0].cpu().numpy()
+        seg_mean = seg_mean[0].cpu().numpy()
+
+        center_rotated = bbox[0:3] + self.mean_xyz + seg_mean + tnet
+        center_cam = np.linalg.inv(R_frustum) @ center_rotated
+
+        h = bbox[3] + self.mean_size[0]
+        w = bbox[4] + self.mean_size[1]
+        l = bbox[5] + self.mean_size[2]
+
+        bin_id    = int(np.argmax(bbox[6:6 + NH]))
+        bin_resid = bbox[6 + NH:6 + 2 * NH][bin_id]
+        yaw = wrap_to_pi(bin_center(bin_id) + bin_resid + frustum_angle)
+
+        if SANITY_GATE:
+            if not (1.0 <= h <= 2.5 and 1.2 <= w <= 2.6 and 2.5 <= l <= 6.5):
+                return None, fg_pct
+            if not (0.0 <= center_cam[2] <= 80.0):
+                return None, fg_pct
+
+        return {
+            'center': center_cam,
+            'h': float(h), 'w': float(w), 'l': float(l),
+            'yaw': float(yaw),
+        }, fg_pct
+
+    def _read_xyzi(self, pc2_msg):
+        """Read x, y, z, intensity. Intensity defaults to 0 if not present."""
+        field_names = [f.name for f in pc2_msg.fields]
+        if 'intensity' in field_names:
+            raw = pc2.read_points(pc2_msg,
+                                  field_names=('x', 'y', 'z', 'intensity'),
+                                  skip_nans=True)
+            pts = [(p[0], p[1], p[2], p[3]) for p in raw]
+        else:
+            raw = pc2.read_points(pc2_msg,
+                                  field_names=('x', 'y', 'z'),
+                                  skip_nans=True)
+            pts = [(p[0], p[1], p[2], 0.0) for p in raw]
+        return np.array(pts, dtype=np.float64) if pts else np.zeros((0, 4))
+
+    def _read_xyz(self, pc2_msg):
+        raw = pc2.read_points(pc2_msg, field_names=('x', 'y', 'z'),
+                              skip_nans=True)
+        pts = [(p[0], p[1], p[2]) for p in raw]
+        return np.array(pts, dtype=np.float64) if pts else np.zeros((0, 3))
+
+    def _depth_histogram_string(self, z, bin_width=5.0):
+        """One-line text histogram so we can see in the logs where the points sit."""
+        if z.size == 0:
+            return "(empty)"
+        edges = np.arange(0.0, max(40.0, float(z.max()) + bin_width), bin_width)
+        counts, _ = np.histogram(z, bins=edges)
+        # only show non-empty bins, compact format: "10-15:181 15-20:19 ..."
+        parts = []
+        for i, c in enumerate(counts):
+            if c > 0:
+                parts.append(f"{int(edges[i])}-{int(edges[i+1])}:{int(c)}")
+        return " ".join(parts) if parts else "(all empty?)"
+
+    def _make_box_marker(self, box3d, stamp, marker_id):
+        cx, cy_, cz = box3d['center']
+        h, w, l, yaw = box3d['h'], box3d['w'], box3d['l'], box3d['yaw']
+
+        x_h, y_h, z_h = l / 2.0, h / 2.0, w / 2.0
+        local = np.array([
+            [ x_h, -y_h,  z_h], [ x_h, -y_h, -z_h],
+            [-x_h, -y_h, -z_h], [-x_h, -y_h,  z_h],
+            [ x_h,  y_h,  z_h], [ x_h,  y_h, -z_h],
+            [-x_h,  y_h, -z_h], [-x_h,  y_h,  z_h],
+        ], dtype=np.float64)
+        c, s = np.cos(yaw), np.sin(yaw)
+        R = np.array([[ c, 0,  s],
+                      [ 0, 1,  0],
+                      [-s, 0,  c]], dtype=np.float64)
+        world = (R @ local.T).T + np.array([cx, cy_, cz])
+
+        edges = [(0,1),(1,2),(2,3),(3,0),
+                 (4,5),(5,6),(6,7),(7,4),
+                 (0,4),(1,5),(2,6),(3,7)]
+
+        m = Marker()
+        m.header.frame_id = 'cam0'
+        m.header.stamp = stamp
+        m.ns = 'cars_3d'
+        m.id = int(marker_id)
+        m.type = Marker.LINE_LIST
+        m.action = Marker.ADD
+        m.scale.x = 0.15                # thicker lines for visibility
+        m.color.r = 0.0; m.color.g = 1.0; m.color.b = 0.2; m.color.a = 1.0
+        m.pose.orientation.w = 1.0
+        m.lifetime = rclpy.duration.Duration(seconds=MARKER_LIFETIME_SEC).to_msg()
+        for (i, j) in edges:
+            p1 = Point(); p1.x, p1.y, p1.z = world[i].tolist()
+            p2 = Point(); p2.x, p2.y, p2.z = world[j].tolist()
+            m.points.append(p1); m.points.append(p2)
+        return m
+
+    def _make_label_marker(self, box3d, stamp, marker_id, text):
+        cx, cy_, cz = box3d['center']
+        m = Marker()
+        m.header.frame_id = 'cam0'
+        m.header.stamp = stamp
+        m.ns = 'cars_3d'
+        m.id = int(marker_id)
+        m.type = Marker.TEXT_VIEW_FACING
+        m.action = Marker.ADD
+        m.pose.position.x = float(cx)
+        m.pose.position.y = float(cy_ - box3d['h'] / 2.0 - 0.3)
+        m.pose.position.z = float(cz)
+        m.pose.orientation.w = 1.0
+        m.scale.z = 0.8                  # bigger text for visibility
+        m.color.r = 1.0; m.color.g = 1.0; m.color.b = 0.0; m.color.a = 1.0
+        m.lifetime = rclpy.duration.Duration(seconds=MARKER_LIFETIME_SEC).to_msg()
+        m.text = text
+        return m
+
+
+def main():
+    rclpy.init()
+    node = CarInferenceNode()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    node.destroy_node()
+    rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
