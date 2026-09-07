@@ -1,0 +1,58 @@
+# ROS 2 build artifacts
+build/
+install/
+log/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Virtual environments
+venv/
+env/
+.venv/
+.env
+
+# Model weights and checkpoints — never publish
+*.pth
+*.pt
+*.ckpt
+*.onnx
+*.engine
+*.trt
+
+# Sensor data — never publish
+*.db3
+*.bag
+*.pcap
+*.pcd
+*.npz
+*.npy
+*.mcap
+
+# Dataset stats and pickles (KITTI-derived)
+*.pkl
+
+# Large media
+*.mp4
+*.avi
+*.mov
+*.mkv
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Container / build
+*.log
+*.tmp
+core.*
